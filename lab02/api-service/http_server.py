@@ -1,8 +1,11 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
 import hashlib
 import re
+import jwt
+from jwt.exceptions import ExpiredSignatureError
 
 from auth_accessor import AuthAccessor
 from user_accessor import UserAccessor
@@ -11,18 +14,23 @@ from entities import UserCreate, UserResponse, LoginItems, Tokens, RefreshToken
 class HttpServer:
     PAGINATION_LIMIT = 100
 
-    def __init__(self, auth_nats_url: str, user_nats_url: str, password_salt: str):
+    def __init__(self, auth_nats_url: str, user_nats_url: str, password_salt: str, jwt_secret: str):
         self.auth_accessor = AuthAccessor(auth_nats_url)
         self.user_accessor = UserAccessor(user_nats_url)
+        
         self.password_salt = password_salt
+        self.jwt_secret = jwt_secret
+        
         self.app = FastAPI(lifespan=self.lifespan)
 
-        self.app.post("/users", response_model=UserResponse)(self.create_user)
-        self.app.get("/users/{user_id}", response_model=UserResponse)(self.get_user)
-        self.app.get("/users", response_model=list[UserResponse])(self.get_users)
+        self.app.post("/api/v1/register/", response_model=UserResponse)(self.create_user)
+        self.app.get("/api/v1/users/{user_id}/", response_model=UserResponse)(self.get_user)
+        self.app.get("/api/v1/users/", response_model=list[UserResponse])(self.get_users)
 
-        self.app.post("/login", response_model=Tokens)(self.login)
-        self.app.post("/refresh", response_model=Tokens)(self.refresh)
+        self.app.post("/api/v1/login/", response_model=Tokens)(self.login)
+        self.app.post("/api/v1/refresh/", response_model=Tokens)(self.refresh)
+
+        self.app.middleware("http")(self.auth_middleware)
 
     @asynccontextmanager
     async def lifespan(self, app: FastAPI):
@@ -40,17 +48,46 @@ class HttpServer:
             return user
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
+        
+    async def auth_middleware(self, request: Request, call_next):
+        if not request.url.path.startswith("/api/v1/users"):
+            return await call_next(request)
 
-    async def get_user(self, user_id: int):
+        auth_header = request.headers.get("Authorization")
+        if auth_header is None or not auth_header.startswith("Bearer "):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+            
+        access_token = auth_header.split(" ")
+        if len(access_token) != 2:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        
+        try:
+            payload = jwt.decode(
+                access_token[1],
+                self.jwt_secret,
+                algorithms=["HS256"]
+            )
+            user_id = payload.get("user_id")
+            request.state.user_id = user_id
+        except ExpiredSignatureError:
+            return JSONResponse(status_code=401, content={"detail": "Expired token"})
+        except Exception as e:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+        return await call_next(request)
+
+    async def get_user(self, request: Request, user_id: int):
         try:
             user = await self.user_accessor.get_user_by_id(user_id)
             if user == None:
                 raise HTTPException(status_code=404, detail="User not found")
+            if user_id != request.state.user_id:
+                user.email = None
             return user
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
         
-    async def get_users(self, 
+    async def get_users(self, request: Request,
                         nickname: str = Query(None), 
                         first_name: str = Query(None), 
                         last_name: str = Query(None),
@@ -58,6 +95,9 @@ class HttpServer:
                         offset: int = Query(0)):
         try:
             users = await self.user_accessor.get_users(nickname, first_name, last_name, limit, offset)
+            for user in users:
+                if request.state.user_id != user.id:
+                    user.email = None
             return users
         except RuntimeError as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -116,4 +156,3 @@ class HttpServer:
     
     def __validate_password(self, password: str) -> bool:
         return bool(re.match(r'^[a-zA-Z0-9]{8,20}$', password))
-    
