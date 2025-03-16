@@ -1,7 +1,8 @@
 from pydantic import BaseModel
+from datetime import datetime
 
 class UserCreate(BaseModel):
-    nickname: str
+    login: str
     first_name: str
     last_name: str
     email: str
@@ -11,11 +12,13 @@ class UserResponse(BaseModel):
     id: int
     first_name: str
     last_name: str
-    nickname: str
+    login: str
     email: str
+    is_admin: bool
+    created_at: datetime
 
 class LoginItems(BaseModel):
-    email: str
+    login: str
     password: str
 
 class Tokens(BaseModel):

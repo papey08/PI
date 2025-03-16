@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import uvicorn
@@ -9,7 +9,8 @@ from jwt.exceptions import ExpiredSignatureError
 
 from auth_accessor import AuthAccessor
 from user_accessor import UserAccessor
-from entities import UserCreate, UserResponse, LoginItems, Tokens, RefreshToken
+import entities
+import exceptions
 
 class HttpServer:
     PAGINATION_LIMIT = 100
@@ -23,12 +24,12 @@ class HttpServer:
         
         self.app = FastAPI(lifespan=self.lifespan)
 
-        self.app.post("/api/v1/register/", response_model=UserResponse)(self.create_user)
-        self.app.get("/api/v1/users/{user_id}/", response_model=UserResponse)(self.get_user)
-        self.app.get("/api/v1/users/", response_model=list[UserResponse])(self.get_users)
+        self.app.post("/api/v1/register/", response_model=entities.UserResponse)(self.create_user)
+        self.app.get("/api/v1/users/{user_id}/", response_model=entities.UserResponse)(self.get_user)
+        self.app.get("/api/v1/users/", response_model=list[entities.UserResponse])(self.get_users)
 
-        self.app.post("/api/v1/login/", response_model=Tokens)(self.login)
-        self.app.post("/api/v1/refresh/", response_model=Tokens)(self.refresh)
+        self.app.post("/api/v1/login/", response_model=entities.Tokens)(self.login)
+        self.app.post("/api/v1/refresh/", response_model=entities.Tokens)(self.refresh)
 
         self.app.middleware("http")(self.auth_middleware)
 
@@ -40,14 +41,16 @@ class HttpServer:
         await self.auth_accessor.__aexit__(None, None, None)
         await self.user_accessor.__aexit__(None, None, None)
 
-    async def create_user(self, user: UserCreate):
+    async def create_user(self, user: entities.UserCreate):
         try:
             self.__validate_user(user)
             user.password = self.__hash_password(user.password)
             user = await self.user_accessor.create_user(user)
             return user
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except exceptions.UserAlreadyExistsException as e:
+            return JSONResponse(status_code=400, content={"detail": str(e)})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
         
     async def auth_middleware(self, request: Request, call_next):
         if not request.url.path.startswith("/api/v1/users"):
@@ -71,56 +74,53 @@ class HttpServer:
             request.state.user_id = user_id
         except ExpiredSignatureError:
             return JSONResponse(status_code=401, content={"detail": "Expired token"})
-        except Exception as e:
+        except Exception:
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
         return await call_next(request)
 
     async def get_user(self, request: Request, user_id: int):
         try:
-            user = await self.user_accessor.get_user_by_id(user_id)
-            if user == None:
-                raise HTTPException(status_code=404, detail="User not found")
-            if user_id != request.state.user_id:
-                user.email = None
+            user = await self.user_accessor.get_user_by_id(user_id, request.state.user_id)
             return user
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except exceptions.UserNotFoundException as e:
+            return JSONResponse(status_code=404, content={"detail": str(e)})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
         
     async def get_users(self, request: Request,
-                        nickname: str = Query(None), 
-                        first_name: str = Query(None), 
-                        last_name: str = Query(None),
+                        login: str = Query(''), 
+                        first_name: str = Query(''), 
+                        last_name: str = Query(''),
                         limit: int = Query(PAGINATION_LIMIT),
                         offset: int = Query(0)):
         try:
-            users = await self.user_accessor.get_users(nickname, first_name, last_name, limit, offset)
-            for user in users:
-                if request.state.user_id != user.id:
-                    user.email = None
+            users = await self.user_accessor.get_users(request.state.user_id, login, first_name, last_name, limit, offset)
             return users
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
         
-    async def login(self, items: LoginItems):
+    async def login(self, items: entities.LoginItems):
         try:
             items.password = self.__hash_password(items.password)
-            user = await self.user_accessor.login(items)
-            if user == None:
-                raise HTTPException(status_code=400, detail="unable to login")
-            tokens = await self.auth_accessor.create_tokens(user.id)
+            user_id = await self.user_accessor.login(items)
+            tokens = await self.auth_accessor.create_tokens(user_id)
             return tokens
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+        except exceptions.LoginUnableException as e:
+            return JSONResponse(status_code=401, content={"detail": str(e)})
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
-    async def refresh(self, refresh: RefreshToken):
+    async def refresh(self, refresh: entities.RefreshToken):
         try:
             tokens = await self.auth_accessor.refresh_tokens(refresh.refresh)
             if tokens == None:
-                raise HTTPException(status_code=401, detail="expired tokens")
+                return JSONResponse(status_code=401, content={"detail": "expired tokens"})
             return tokens
+        except exceptions.ExpiredRefreshTokenException as e:
+            return JSONResponse(status_code=401, content={"detail": str(e)})
         except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=str(e))
+            return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
     def run(self, host: str, port: int):
         uvicorn.run(self.app, host=host, port=port)
@@ -131,25 +131,25 @@ class HttpServer:
         sha256_hash.update(password.encode('utf-8'))
         return sha256_hash.hexdigest()
     
-    def __validate_user(self, user: UserCreate):
+    def __validate_user(self, user: entities.UserCreate):
         if not self.__validate_email(user.email):
-            raise HTTPException(status_code=400, detail="Invalid email")
-        if not self.__validate_nickname(user.nickname):
-            raise HTTPException(status_code=400, detail="nickname max length is 100")
+            return JSONResponse(status_code=400, content={"detail": "Invalid email"})
+        if not self.__validate_login(user.login):
+            return JSONResponse(status_code=400, content={"detail": "login max length is 100"})
         if not self.__validate_name(user.first_name):
-            raise HTTPException(status_code=400, detail="first name max length is 50")
+            return JSONResponse(status_code=400, content={"detail": "first name max length is 50"})
         if not self.__validate_name(user.last_name):
-            raise HTTPException(status_code=400, detail="last name max length is 50")
+            return JSONResponse(status_code=400, content={"detail": "last name max length is 50"})
         if not self.__validate_password(user.password):
-            raise HTTPException(
+            return JSONResponse(
                 status_code=400, 
-                detail="password length must be between 8 and 20 and only latin letters and digits are allowed")
+                content={"detail": "password length must be between 8 and 20 and only latin letters and digits are allowed"})
 
     def __validate_email(self, email: str) -> bool:
         return bool(re.match(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', email))
     
-    def __validate_nickname(self, nickname: str) -> bool:
-        return len(nickname) <= 100
+    def __validate_login(self, login: str) -> bool:
+        return len(login) <= 100
     
     def __validate_name(self, name: str) -> bool:
         return len(name) <= 50

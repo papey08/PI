@@ -7,6 +7,9 @@ import random
 import string
 
 from memory_accessor import MemoryAccessor
+from exceptions import ExpiredRefreshTokenException
+import dto
+import codes
 
 import logging
 logging.basicConfig(
@@ -25,34 +28,50 @@ class NatsServer:
         self.nc = await nats.connect(self.nats_url)
 
     async def handle_create(self, msg):
-        user_id = int(msg.data.decode())
+        try:
+            user_id = dto.CreateTokensMessage.model_validate_json(msg.data).user_id
 
-        logging.info(f'creating tokens for user {user_id}')
-        access = self.__create_access_token(user_id)
-        refresh = self.__generate_refresh()
-        self.memory_accessor.save_refresh_token(user_id, refresh)
-        logging.info(f'created tokens for user {user_id}')
+            logging.info(f'creating tokens for user {user_id}')
+            access = self.__create_access_token(user_id)
+            refresh = self.__generate_refresh()
+            self.memory_accessor.save_refresh_token(user_id, refresh)
+            logging.info(f'created tokens for user {user_id}')
 
-        await msg.respond(json.dumps({"access": access, "refresh": refresh}).encode())
+            await msg.respond(dto.CreateTokensResponse(access=access, refresh=refresh).model_dump_json().encode())
+        except Exception as e:
+            logging.error(f'could not create tokens: {e}')
+            error = dto.ErrorResponse(
+                code=codes.INTERNAL_ERROR,
+                details=str(e)
+            )
+            await msg.respond(error.model_dump_json().encode())
 
     async def handle_refresh_tokens(self, msg):
-        refresh_token = msg.data.decode()
+        try:
+            refresh_token = dto.RefreshTokensMessage.model_validate_json(msg.data).refresh
 
-        user_id = self.memory_accessor.get_user_id_by_token(refresh_token)
-        logging.info(f'refreshing tokens for user {user_id}')
+            user_id = self.memory_accessor.get_user_id_by_token(refresh_token)
+            logging.info(f'refreshing tokens for user {user_id}')
 
-        if user_id:
             access = self.__create_access_token(user_id)
             refresh = self.__generate_refresh()
             self.memory_accessor.save_refresh_token(user_id, refresh)
 
             logging.info(f'refreshed tokens for user {user_id}')
-            await msg.respond(json.dumps({"access": access, "refresh": refresh}).encode())
-        else:
-            logging.error(f'could not refresh tokens for user {user_id}')
-            await msg.respond(b"")
-            
-
+            await msg.respond(dto.RefreshTokensResponse(access=access, refresh=refresh).model_dump_json().encode())
+        except ExpiredRefreshTokenException as e:
+            logging.error(f'could not refresh tokens')
+            error = dto.ErrorResponse(
+                code=codes.EXPIRED_REFRESH_TOKEN,
+                details=str(e)
+            )
+            await msg.respond(error.model_dump_json().encode())
+        except Exception as e:
+            logging.error(f'could not refresh tokens')
+            error = dto.ErrorResponse(
+                code=codes.INTERNAL_ERROR,
+                details=str(e)
+            )
 
     async def run(self):
         await self.connect()
