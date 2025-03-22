@@ -1,14 +1,25 @@
 from datetime import datetime, timezone
 
-from entities import User
-import exceptions
+from common.entities import User
+import common.exceptions as exceptions
 
 class MemoryAccessor:
     def __init__(self):
-        self.users_db = {}
+        self.users_db = {
+            1: User(
+                id=1,
+                login='admin',
+                first_name='Илья',
+                last_name='Ирбитский',
+                email='myhamster@mail.ru',
+                password='4d4384524b0f5b3a4750c60df2e70b7d4592966b757c698ed4a592ba928d9517', # hashed 'secret'
+                is_admin=True,
+                created_at=datetime.now(timezone.utc)
+            )
+        }
         self.logins = set()
         self.emails = set()
-        self.current_id = 1
+        self.current_id = 2
 
     def create_user(self, 
                     login: str,
@@ -17,7 +28,7 @@ class MemoryAccessor:
                     email: str, 
                     password: str) -> User:
         if login in self.logins or email in self.emails:
-            raise exceptions.UserAlreadyExistsException(login, email)
+            raise exceptions.UserAlreadyExistsException()
         id = self.current_id
         user = User(
             id=id, 
@@ -35,13 +46,13 @@ class MemoryAccessor:
         self.emails.add(email)
         return user
     
-    def get_user_by_id(self, user_id: int, actor_id: int) -> User:
+    def get_user_by_id(self, user_id: int) -> User:
         user = self.users_db.get(user_id)
         if user:
             return user
-        raise exceptions.UserNotFoundException(user_id)
+        raise exceptions.UserNotFoundException()
     
-    def get_users(self, login: str, first_name: str, last_name: str, limit: int, offset: int, actor_id: int) -> list[User]:
+    def get_users(self, login: str, first_name: str, last_name: str, limit: int, offset: int) -> list[User]:
         res = []
         for user in self.users_db.values():
             if ((login != '' and user.login == login) or login == '') and \

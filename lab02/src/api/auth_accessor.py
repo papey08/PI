@@ -4,10 +4,10 @@ from typing import Optional
 from pydantic import ValidationError
 
 
-from entities import Tokens
-import dto
-import exceptions
-import codes
+from common.entities import Tokens
+import common.dto as dto
+import common.exceptions as exceptions
+import common.codes as codes
 
 class AuthAccessor:
     def __init__(self, nats_url: str):
@@ -25,7 +25,7 @@ class AuthAccessor:
     async def create_tokens(self, user_id: int) -> Tokens:
         try:
             msg = dto.CreateTokensMessage(user_id=user_id)
-            response = await self.nc.request("create_tokens", msg.model_dump_json().encode())
+            response = await self.nc.request('create_tokens', msg.model_dump_json().encode(), timeout=30)
             res = dto.CreateTokensResponse.model_validate_json(response.data)
             return Tokens(access=res.access, refresh=res.refresh)
         except ValidationError:
@@ -36,7 +36,7 @@ class AuthAccessor:
     async def refresh_tokens(self, refresh_token: str) -> Tokens:
         try:
             msg = dto.RefreshTokensMessage(refresh=refresh_token)
-            response = await self.nc.request("refresh_tokens", msg.model_dump_json().encode())
+            response = await self.nc.request('refresh_tokens', msg.model_dump_json().encode(), timeout=30)
             res = dto.RefreshTokensResponse.model_validate_json(response.data)
             return Tokens(access=res.access, refresh=res.refresh)
         except ValidationError:

@@ -3,10 +3,11 @@ from nats.aio.client import Client as NATSClient
 from typing import Optional
 from pydantic import ValidationError
 
-import entities
-import dto
-import exceptions
-import codes
+import http_dto
+import common.entities as entities
+import common.dto as dto
+import common.exceptions as exceptions
+import common.codes as codes
 
 class UserAccessor:
     def __init__(self, nats_url: str):
@@ -21,7 +22,7 @@ class UserAccessor:
         if self.nc:
             await self.nc.close()
 
-    async def create_user(self, user: entities.UserCreate) -> entities.UserResponse:
+    async def create_user(self, user: http_dto.UserCreate) -> entities.User:
         try:
             msg = dto.CreateUserMessage(
                 login=user.login,
@@ -30,9 +31,9 @@ class UserAccessor:
                 email=user.email,
                 password=user.password
             )
-            response = await self.nc.request("create_user", msg.model_dump_json().encode())
+            response = await self.nc.request('create_user', msg.model_dump_json().encode(), timeout=30)
             res = dto.CreateUserResponse.model_validate_json(response.data)
-            return entities.UserResponse(
+            return entities.User(
                 id=res.id,
                 first_name=res.first_name,
                 last_name=res.last_name,
@@ -44,16 +45,16 @@ class UserAccessor:
         except ValidationError:
             err = dto.ErrorResponse.model_validate_json(response.data)
             if err.code == codes.USER_ALREADY_EXISTS:
-                raise exceptions.UserAlreadyExistsException(login=user.login, email=user.email)
+                raise exceptions.UserAlreadyExistsException()
             if err.code == codes.INTERNAL_ERROR:
                 raise exceptions.InternalException()
 
-    async def get_user_by_id(self, user_id: int, actor_id: int) -> entities.UserResponse:
+    async def get_user_by_id(self, user_id: int) -> entities.User:
         try:
-            msg = dto.GetUserByIdMessage(user_id=user_id, actor_id=actor_id)
-            response = await self.nc.request("get_user_by_id", msg.model_dump_json().encode())
+            msg = dto.GetUserByIdMessage(user_id=user_id)
+            response = await self.nc.request('get_user_by_id', msg.model_dump_json().encode(), timeout=30)
             res = dto.GetUserByIdResponse.model_validate_json(response.data)
-            return entities.UserResponse(
+            return entities.User(
                 id=res.id,
                 first_name=res.first_name,
                 last_name=res.last_name,    
@@ -65,29 +66,27 @@ class UserAccessor:
         except ValidationError:
             err = dto.ErrorResponse.model_validate_json(response.data)
             if err.code == codes.USER_NOT_FOUND:
-                raise exceptions.UserNotFoundException(user_id=user_id)
+                raise exceptions.UserNotFoundException()
             if err.code == codes.INTERNAL_ERROR:
                 raise exceptions.InternalException()
     
     async def get_users(self, 
-                        actor_id: int,
                         login: str, 
                         first_name: str, 
                         last_name: str,
                         limit: int = 100,
                         offset: int = 0,
-                        ) -> list[entities.UserResponse]:
+                        ) -> list[entities.User]:
         try:
             msg = dto.GetUsersMessage(
                 login=login,
                 first_name=first_name,
                 last_name=last_name,
                 limit=limit,
-                offset=offset,
-                actor_id=actor_id
+                offset=offset
             )
-            response = await self.nc.request("get_users", msg.model_dump_json().encode())
-            return [entities.UserResponse(
+            response = await self.nc.request('get_users', msg.model_dump_json().encode(), timeout=30)
+            return [entities.User(
                 id=res.id,
                 first_name=res.first_name,
                 last_name=res.last_name,
@@ -104,7 +103,7 @@ class UserAccessor:
     async def login(self, items: entities.LoginItems) -> int:
         try:
             msg = dto.LoginMessage(login=items.login, password=items.password)
-            response = await self.nc.request("login", msg.model_dump_json().encode())
+            response = await self.nc.request('login', msg.model_dump_json().encode(), timeout=30)
             res = dto.LoginResponse.model_validate_json(response.data)
             return res.id
         except ValidationError:

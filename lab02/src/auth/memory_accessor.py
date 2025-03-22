@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 
-from exceptions import ExpiredRefreshTokenException
+from common.exceptions import ExpiredRefreshTokenException
 
 class MemoryAccessor:
     def __init__(self):
